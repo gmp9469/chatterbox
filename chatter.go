@@ -155,8 +155,13 @@ func (c *Chatter) InitiateHandshake(partnerIdentity *PublicKey) (*PublicKey, err
 	}
 
 	// TODO: your code here
-
-	return nil, errors.New("Not implemented")
+	ePrivateKey, ePublicKey, err := GenerateKeyPair()
+	if err != nil {
+		return nil, err
+	}
+	c.Sessions[*partnerIdentity].MyDHRatchet.PrivateKey = ePrivateKey
+	c.Sessions[*partnerIdentity].MyDHRatchet.PublicKey = ePublicKey
+	return ePublicKey, nil
 }
 
 // ReturnHandshake prepares the second message sent in a handshake, containing
@@ -174,8 +179,21 @@ func (c *Chatter) ReturnHandshake(partnerIdentity,
 	}
 
 	// TODO: your code here
-
-	return nil, nil, errors.New("Not implemented")
+	ePrivateKey, ePublicKey, err := GenerateKeyPair()
+	if err != nil {
+		return nil, nil, err
+	}
+	c.Sessions[*partnerIdentity].MyDHRatchet.PrivateKey = ePrivateKey
+	c.Sessions[*partnerIdentity].MyDHRatchet.PublicKey = ePublicKey
+	gAb := DHCombine(ePublicKey, partnerIdentity)
+	gab := DHCombine(partnerEphemeral, ePrivateKey)
+	gaB := DHCombine(partnerEphemeral, c.Identity)
+	root := CombineKeys(gAb, gaB, gab)
+	authKey := root.DeriveKey(HANDSHAKE_CHECK_LABEL)
+	c.Sessions[*partnerIdentity].Rootchain=root
+	c.Sessions[*partnerIdentity].authKey=authKey
+	c.Sessions[*partnerIdentity].PartnerDHRatchet=partnerEphemeral
+	return ePublicKey, authKey, nil
 }
 
 // FinalizeHandshake lets the initiator receive the responder's ephemeral key
@@ -188,8 +206,15 @@ func (c *Chatter) FinalizeHandshake(partnerIdentity,
 	}
 
 	// TODO: your code here
-
-	return nil, errors.New("Not implemented")
+	gAb := DHCombine(partnerEphemeral, c.Identity)
+	gab := DHCombine(partnerEphemeral, c.Sessions[*partnerIdentity].MyDHRatchet.PrivateKey)
+	gaB := DHCombine(c.Sessions[*partnerIdentity].MyDHRatchet.PublicKey, partnerIdentity)
+	root := CombineKeys(gAb, gaB, gab)
+	authKey := root.DeriveKey(HANDSHAKE_CHECK_LABEL)
+	c.Sessions[*partnerIdentity].RootChain=root
+	c.Sessions[*partnerIdentity].authKey=authKey
+	c.Sessions[*partnerIdentity].PartnerDHRatchet=partnerEphemeral
+	return authKey, nil
 }
 
 // SendMessage is used to send the given plaintext string as a message.
@@ -208,8 +233,29 @@ func (c *Chatter) SendMessage(partnerIdentity *PublicKey,
 	}
 
 	// TODO: your code here
+	//Dont understand what ROOT_LABEL is for so I might be doing this wrong
+	sendCounter := c.Sessions[*partnerIdentity].SendCounter
+	var chainKey *SymmetricKey
 
-	return message, errors.New("Not implemented")
+	if sendCounter == 0 {
+		chainKey := c.Sessions[*partnerIdentity].RootChain.DeriveKey(CHAIN_LABEL)
+	}
+	else{
+		chainKey := c.Sessions[*partnerIdentity].SendChain.DeriveKey(CHAIN_LABEL)
+	}
+	c.Sessions[*partnerIdentity].SendChain = chainKey
+	c.Sessions[*partnerIdentity].SendCounter ++
+	messageKey := chainKey.DeriveKey(KEY_LABEL)
+	iv := NewIV()
+	cipher, err := messageKey.AuthenticatedEncrypt(plaintext, []byte{}, iv)//im not sure what is supposed to go in the additionalData field
+	if err != nil {
+		return "", err
+	}
+
+	message.Counter = sendCounter
+	message.Ciphertext = cipher
+	message.IV = iv
+	return message, nil
 }
 
 // ReceiveMessage is used to receive the given message and return the correct
@@ -222,6 +268,23 @@ func (c *Chatter) ReceiveMessage(message *Message) (string, error) {
 	}
 
 	// TODO: your code here
+	var chainKey, messageKey *SymmetricKey
 
-	return "", errors.New("Not implemented")
+	if message.Counter == 0 {
+		chainKey = c.Sessions[*message.Sender].RootChain.DeriveKey(CHAIN_LABEL)
+	} 
+	else {
+		chainKey = c.Sessions[*message.Sender].ReceiveChain.DeriveKey(CHAIN_LABEL)
+	}
+	messageKey = chainKey.DeriveKey(KEY_LABEL)
+	plaintext, err := messageKey.AuthenticatedDecrypt(message.Ciphertext, nil, message.IV)
+	if err != nil {
+		return "", nil
+	}
+	c.Sessions[*message.Sender].ReceiveCounter++
+	if message.Counter > 0 && message.Counter == c.Sessions[*message.Sender].RecieveCounter {
+		c.Sessions[*message.Sender].ReceiveChain = chainKey //syncing results
+	}
+
+	return plaintext, nil
 }
